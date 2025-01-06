@@ -1,0 +1,17 @@
+name: Status Checks
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - name: Install dependencies
+        run: go mod tidy
+      - name: Test
+        run: go test -cover ./...
