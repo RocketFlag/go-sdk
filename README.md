@@ -18,24 +18,28 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/rocketflag/go-sdk"
+	rocketflag "github.com/rocketflag/go-sdk"
 )
 
 func main() {
-	client, err := rocketflag.NewClient()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	ctx := context.Background()
+	rf := rocketflag.NewClient()
 
 	// Example: Get a single flag
-	flag, err := client.GetFlag(ctx, "my-flag")
+	flag, err := rf.GetFlag("flag-id", rocketflag.UserContext{})
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("Flag:", flag)
 }
+```
+
+## Including a Cohort
+
+If you want to use a cohort and only enable flags for certain users, you'll need to setup the accepted cohorts in the console. Once done,
+you can pass the cohort like so with the SDK:
+
+```go
+flag, err := rf.GetFlag("flag-id", rocketflag.UserContext{"cohort": "user@example.com"})
 ```
 
 ## Overrides
