@@ -239,7 +239,7 @@ func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	}, nil
 }
 
-func newCountingClient(t *testing.T, flag *FlagStatus) (*Client, *countingTransport) {
+func newCountingClient(t *testing.T, flag *FlagStatus, opts ...ClientOption) (*Client, *countingTransport) {
 	t.Helper()
 	body, err := json.Marshal(flag)
 	if err != nil {
@@ -247,14 +247,13 @@ func newCountingClient(t *testing.T, flag *FlagStatus) (*Client, *countingTransp
 	}
 	transport := &countingTransport{body: body}
 	httpClient := &http.Client{Transport: transport}
-	return NewClient(WithHTTPClient(httpClient)), transport
+	allOpts := append([]ClientOption{WithHTTPClient(httpClient)}, opts...)
+	return NewClient(allOpts...), transport
 }
 
 func TestGetFlag_CacheHit(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
-	client, transport := newCountingClient(t, flag)
-	client.cache = newCache()
-	client.defaultTTL = time.Minute
+	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
 	for i := 0; i < 3; i++ {
 		got, err := client.GetFlag("123", UserContext{"cohort": "beta"})
@@ -273,9 +272,7 @@ func TestGetFlag_CacheHit(t *testing.T) {
 
 func TestGetFlag_CacheExpiry(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
-	client, transport := newCountingClient(t, flag)
-	client.cache = newCache()
-	client.defaultTTL = 10 * time.Millisecond
+	client, transport := newCountingClient(t, flag, WithCache(10*time.Millisecond))
 
 	if _, err := client.GetFlag("123", nil); err != nil {
 		t.Fatal(err)
@@ -292,9 +289,7 @@ func TestGetFlag_CacheExpiry(t *testing.T) {
 
 func TestGetFlag_CacheKeyIncludesUserContext(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
-	client, transport := newCountingClient(t, flag)
-	client.cache = newCache()
-	client.defaultTTL = time.Minute
+	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
 	if _, err := client.GetFlag("123", UserContext{"cohort": "alpha"}); err != nil {
 		t.Fatal(err)
@@ -308,16 +303,14 @@ func TestGetFlag_CacheKeyIncludesUserContext(t *testing.T) {
 	}
 }
 
-func TestGetFlag_PerCallTTLOverride(t *testing.T) {
+func TestGetFlag_PerCallTTLDisables(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
-	client, transport := newCountingClient(t, flag)
-	client.cache = newCache()
-	client.defaultTTL = time.Minute
+	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
-	if _, err := client.GetFlag("123", nil, WithCallSeconds(0)); err != nil {
+	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.GetFlag("123", nil, WithCallSeconds(0)); err != nil {
+	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -330,28 +323,15 @@ func TestGetFlag_PerCallTTLEnables(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
 	client, transport := newCountingClient(t, flag)
 
-	if _, err := client.GetFlag("123", nil, WithCallMinutes(1)); err != nil {
+	if _, err := client.GetFlag("123", nil, WithCallTTL(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.GetFlag("123", nil, WithCallMinutes(1)); err != nil {
+	if _, err := client.GetFlag("123", nil, WithCallTTL(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
 	if n := atomic.LoadInt32(&transport.count); n != 1 {
 		t.Errorf("expected 1 HTTP request when per-call TTL enables cache, got %d", n)
-	}
-}
-
-func TestGetFlag_PerCallConflictReturnsError(t *testing.T) {
-	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
-	client, _ := newCountingClient(t, flag)
-
-	_, err := client.GetFlag("123", nil, WithCallSeconds(30), WithCallMinutes(1))
-	if err == nil {
-		t.Fatal("expected error when both WithCallSeconds and WithCallMinutes are set")
-	}
-	if !strings.Contains(err.Error(), "both WithCallSeconds and WithCallMinutes") {
-		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -370,34 +350,25 @@ func TestGetFlag_NoCacheByDefault(t *testing.T) {
 	}
 }
 
-func TestWithCacheMinutes_EnablesCaching(t *testing.T) {
-	client := NewClient(WithCacheMinutes(1))
-	if client.cache == nil {
-		t.Fatal("expected cache to be initialised")
-	}
-	if client.defaultTTL != time.Minute {
-		t.Errorf("expected defaultTTL=1m, got %v", client.defaultTTL)
-	}
-}
+func TestGetFlag_CachedResultIsolatedFromCallerMutation(t *testing.T) {
+	flag := &FlagStatus{Name: "original", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
-func TestWithCacheSeconds_EnablesCaching(t *testing.T) {
-	client := NewClient(WithCacheSeconds(30))
-	if client.cache == nil {
-		t.Fatal("expected cache to be initialised")
+	first, err := client.GetFlag("123", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if client.defaultTTL != 30*time.Second {
-		t.Errorf("expected defaultTTL=30s, got %v", client.defaultTTL)
-	}
-}
+	first.Name = "mutated"
 
-func TestClientCacheConflictReturnsError(t *testing.T) {
-	client := NewClient(WithCacheSeconds(30), WithCacheMinutes(1))
-	_, err := client.GetFlag("123", nil)
-	if err == nil {
-		t.Fatal("expected error from GetFlag when both cache options are set")
+	second, err := client.GetFlag("123", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "both WithCacheSeconds and WithCacheMinutes") {
-		t.Errorf("unexpected error: %v", err)
+	if second.Name != "original" {
+		t.Errorf("cached value was mutated by caller: got %q, want %q", second.Name, "original")
+	}
+	if n := atomic.LoadInt32(&transport.count); n != 1 {
+		t.Errorf("expected 1 HTTP request, got %d", n)
 	}
 }
 
