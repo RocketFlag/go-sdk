@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
+	"time"
 )
 
 // FlagStatus represents the status of a feature flag.
@@ -19,9 +21,11 @@ type UserContext map[string]interface{}
 
 // Client is a RocketFlag API client.
 type Client struct {
-	version string
-	apiUrl  string
-	client  *http.Client
+	version    string
+	apiUrl     string
+	client     *http.Client
+	cache      *cache
+	defaultTTL time.Duration
 }
 
 // ClientOption defines a function type that modifies the Client.
@@ -48,16 +52,43 @@ func WithHTTPClient(client *http.Client) ClientOption {
 	}
 }
 
+// WithCache enables in-memory response caching with the given default TTL.
+// A non-positive ttl leaves caching disabled.
+func WithCache(ttl time.Duration) ClientOption {
+	return func(c *Client) {
+		if ttl <= 0 {
+			return
+		}
+		c.defaultTTL = ttl
+		c.cache = newCache()
+	}
+}
+
+// CallOption modifies behaviour of a single GetFlag call.
+type CallOption func(*callOptions)
+
+type callOptions struct {
+	ttl    time.Duration
+	ttlSet bool
+}
+
+// WithCallTTL overrides the cache TTL for a single GetFlag call. A ttl of 0
+// disables caching for that call even if a default is configured.
+func WithCallTTL(ttl time.Duration) CallOption {
+	return func(o *callOptions) {
+		o.ttl = ttl
+		o.ttlSet = true
+	}
+}
+
 // NewClient creates a new Client with optional configurations.
 func NewClient(opts ...ClientOption) *Client {
-	// Default values
 	client := &Client{
 		version: "v1",
 		apiUrl:  "https://api.rocketflag.app",
 		client:  http.DefaultClient,
 	}
 
-	// Apply functional options
 	for _, opt := range opts {
 		opt(client)
 	}
@@ -66,7 +97,11 @@ func NewClient(opts ...ClientOption) *Client {
 }
 
 // GetFlag retrieves a feature flag from the RocketFlag API.
-func (c *Client) GetFlag(flagID string, userContext UserContext) (*FlagStatus, error) {
+func (c *Client) GetFlag(flagID string, userContext UserContext, opts ...CallOption) (*FlagStatus, error) {
+	co := callOptions{ttl: c.defaultTTL}
+	for _, opt := range opts {
+		opt(&co)
+	}
 
 	u, err := url.Parse(fmt.Sprintf("%s/%s/flags/%s", c.apiUrl, c.version, flagID))
 	if err != nil {
@@ -77,7 +112,17 @@ func (c *Client) GetFlag(flagID string, userContext UserContext) (*FlagStatus, e
 	for k, v := range userContext {
 		q.Set(k, fmt.Sprintf("%v", v))
 	}
-	u.RawQuery = q.Encode()
+	encoded := q.Encode()
+	u.RawQuery = encoded
+
+	cacheActive := c.cache != nil && co.ttl > 0
+	var key string
+	if cacheActive {
+		key = flagID + "?" + encoded
+		if cached, ok := c.cache.get(key); ok {
+			return cached, nil
+		}
+	}
 
 	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -99,5 +144,43 @@ func (c *Client) GetFlag(flagID string, userContext UserContext) (*FlagStatus, e
 		return nil, fmt.Errorf("error decoding response: %w", err)
 	}
 
+	if cacheActive {
+		c.cache.set(key, &flag, co.ttl)
+	}
+
 	return &flag, nil
+}
+
+type cacheEntry struct {
+	flag      *FlagStatus
+	expiresAt time.Time
+}
+
+type cache struct {
+	mu      sync.Mutex
+	entries map[string]cacheEntry
+}
+
+func newCache() *cache {
+	return &cache{entries: make(map[string]cacheEntry)}
+}
+
+func (c *cache) get(key string) (*FlagStatus, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(entry.expiresAt) {
+		delete(c.entries, key)
+		return nil, false
+	}
+	return entry.flag, true
+}
+
+func (c *cache) set(key string, flag *FlagStatus, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = cacheEntry{flag: flag, expiresAt: time.Now().Add(ttl)}
 }

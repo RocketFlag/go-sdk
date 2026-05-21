@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Mocking the http.RoundTripper interface to control HTTP responses
@@ -218,6 +220,134 @@ func TestGetFlag_UserContext(t *testing.T) {
 
 	if !reflect.DeepEqual(actualQuery, expectedQuery) {
 		t.Errorf("Expected query: %+v, got: %+v", expectedQuery, actualQuery)
+	}
+}
+
+// countingTransport tracks how many requests pass through it and returns the
+// supplied response (fresh body each time so multiple reads work).
+type countingTransport struct {
+	count int32
+	body  []byte
+}
+
+func (t *countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	atomic.AddInt32(&t.count, 1)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(t.body)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+	}, nil
+}
+
+func newCountingClient(t *testing.T, flag *FlagStatus) (*Client, *countingTransport) {
+	t.Helper()
+	body, err := json.Marshal(flag)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	transport := &countingTransport{body: body}
+	httpClient := &http.Client{Transport: transport}
+	return NewClient(WithHTTPClient(httpClient)), transport
+}
+
+func TestGetFlag_CacheHit(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag)
+	client.cache = newCache()
+	client.defaultTTL = time.Minute
+
+	for i := 0; i < 3; i++ {
+		got, err := client.GetFlag("123", UserContext{"cohort": "beta"})
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if !reflect.DeepEqual(got, flag) {
+			t.Fatalf("call %d: got %+v, want %+v", i, got, flag)
+		}
+	}
+
+	if n := atomic.LoadInt32(&transport.count); n != 1 {
+		t.Errorf("expected 1 HTTP request, got %d", n)
+	}
+}
+
+func TestGetFlag_CacheExpiry(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag)
+	client.cache = newCache()
+	client.defaultTTL = 10 * time.Millisecond
+
+	if _, err := client.GetFlag("123", nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	if _, err := client.GetFlag("123", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := atomic.LoadInt32(&transport.count); n != 2 {
+		t.Errorf("expected 2 HTTP requests after expiry, got %d", n)
+	}
+}
+
+func TestGetFlag_CacheKeyIncludesUserContext(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag)
+	client.cache = newCache()
+	client.defaultTTL = time.Minute
+
+	if _, err := client.GetFlag("123", UserContext{"cohort": "alpha"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetFlag("123", UserContext{"cohort": "beta"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := atomic.LoadInt32(&transport.count); n != 2 {
+		t.Errorf("expected 2 HTTP requests for differing contexts, got %d", n)
+	}
+}
+
+func TestGetFlag_PerCallTTLOverride(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag)
+	client.cache = newCache()
+	client.defaultTTL = time.Minute
+
+	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := atomic.LoadInt32(&transport.count); n != 2 {
+		t.Errorf("expected 2 HTTP requests when per-call TTL disables cache, got %d", n)
+	}
+}
+
+func TestGetFlag_NoCacheByDefault(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag)
+
+	for i := 0; i < 3; i++ {
+		if _, err := client.GetFlag("123", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if n := atomic.LoadInt32(&transport.count); n != 3 {
+		t.Errorf("expected 3 HTTP requests without caching, got %d", n)
+	}
+}
+
+func TestWithCache_EnablesCaching(t *testing.T) {
+	client := NewClient(WithCache(time.Minute))
+	if client.cache == nil {
+		t.Fatal("expected cache to be initialised")
+	}
+	if client.defaultTTL != time.Minute {
+		t.Errorf("expected defaultTTL=1m, got %v", client.defaultTTL)
 	}
 }
 
