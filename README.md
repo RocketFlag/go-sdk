@@ -5,7 +5,7 @@ This SDK provides a convenient way to interact with the RocketFlag API from your
 ## Installation
 
 ```bash
-go get github.com/rocketflag/go-sdk
+go get github.com/RocketFlag/go-sdk
 ```
 
 ## Basic Usage
@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"log"
 
-	rocketflag "github.com/rocketflag/go-sdk"
+	rocketflag "github.com/RocketFlag/go-sdk"
 )
 
 func main() {
