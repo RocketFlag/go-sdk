@@ -75,6 +75,36 @@ By default, RocketFlag will use the RocketFlag API. This is https://api.rocketfl
 client := rocketflag.NewClient(WithAPIURL("https://api.example.com"))
 ```
 
+### Caching responses
+
+To avoid hitting the API on every check, you can enable an in-memory cache by
+providing a default TTL via `WithCache`. Cached entries are keyed by flag ID
+**and** `UserContext`, so different cohorts/users still resolve independently.
+
+```go
+client := rocketflag.NewClient(rocketflag.WithCache(5 * time.Minute))
+
+// First call hits the API; subsequent calls within 5 minutes are served from cache.
+flag, err := client.GetFlag("flag-id", rocketflag.UserContext{"cohort": "beta"})
+```
+
+You can override the TTL for a single call, or disable caching for that call by
+passing `0`:
+
+```go
+// Force a fresh fetch, bypassing the cache.
+flag, err := client.GetFlag("flag-id", nil, rocketflag.WithCallTTL(0))
+
+// Use a shorter TTL just for this call.
+flag, err := client.GetFlag("flag-id", nil, rocketflag.WithCallTTL(10*time.Second))
+```
+
+Caching is opt-in — without `WithCache` or a per-call override, every call
+goes to the API. The cache has no size cap and entries are only evicted when
+their key is re-requested after expiry; if you call with high-cardinality
+`UserContext` values (e.g. per-user IDs), construct a new client periodically
+to release memory.
+
 ### Chaining custom client options
 
 ```go
