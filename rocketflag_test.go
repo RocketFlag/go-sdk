@@ -314,15 +314,44 @@ func TestGetFlag_PerCallTTLOverride(t *testing.T) {
 	client.cache = newCache()
 	client.defaultTTL = time.Minute
 
-	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
+	if _, err := client.GetFlag("123", nil, WithCallSeconds(0)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
+	if _, err := client.GetFlag("123", nil, WithCallSeconds(0)); err != nil {
 		t.Fatal(err)
 	}
 
 	if n := atomic.LoadInt32(&transport.count); n != 2 {
 		t.Errorf("expected 2 HTTP requests when per-call TTL disables cache, got %d", n)
+	}
+}
+
+func TestGetFlag_PerCallTTLEnables(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag)
+
+	if _, err := client.GetFlag("123", nil, WithCallMinutes(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.GetFlag("123", nil, WithCallMinutes(1)); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := atomic.LoadInt32(&transport.count); n != 1 {
+		t.Errorf("expected 1 HTTP request when per-call TTL enables cache, got %d", n)
+	}
+}
+
+func TestGetFlag_PerCallConflictReturnsError(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, _ := newCountingClient(t, flag)
+
+	_, err := client.GetFlag("123", nil, WithCallSeconds(30), WithCallMinutes(1))
+	if err == nil {
+		t.Fatal("expected error when both WithCallSeconds and WithCallMinutes are set")
+	}
+	if !strings.Contains(err.Error(), "both WithCallSeconds and WithCallMinutes") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -341,13 +370,34 @@ func TestGetFlag_NoCacheByDefault(t *testing.T) {
 	}
 }
 
-func TestWithCache_EnablesCaching(t *testing.T) {
-	client := NewClient(WithCache(time.Minute))
+func TestWithCacheMinutes_EnablesCaching(t *testing.T) {
+	client := NewClient(WithCacheMinutes(1))
 	if client.cache == nil {
 		t.Fatal("expected cache to be initialised")
 	}
 	if client.defaultTTL != time.Minute {
 		t.Errorf("expected defaultTTL=1m, got %v", client.defaultTTL)
+	}
+}
+
+func TestWithCacheSeconds_EnablesCaching(t *testing.T) {
+	client := NewClient(WithCacheSeconds(30))
+	if client.cache == nil {
+		t.Fatal("expected cache to be initialised")
+	}
+	if client.defaultTTL != 30*time.Second {
+		t.Errorf("expected defaultTTL=30s, got %v", client.defaultTTL)
+	}
+}
+
+func TestClientCacheConflictReturnsError(t *testing.T) {
+	client := NewClient(WithCacheSeconds(30), WithCacheMinutes(1))
+	_, err := client.GetFlag("123", nil)
+	if err == nil {
+		t.Fatal("expected error from GetFlag when both cache options are set")
+	}
+	if !strings.Contains(err.Error(), "both WithCacheSeconds and WithCacheMinutes") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

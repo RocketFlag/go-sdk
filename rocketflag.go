@@ -21,11 +21,14 @@ type UserContext map[string]interface{}
 
 // Client is a RocketFlag API client.
 type Client struct {
-	version    string
-	apiUrl     string
-	client     *http.Client
-	cache      *cache
-	defaultTTL time.Duration
+	version      string
+	apiUrl       string
+	client       *http.Client
+	cache        *cache
+	defaultTTL   time.Duration
+	cacheSeconds *int
+	cacheMinutes *int
+	configErr    error
 }
 
 // ClientOption defines a function type that modifies the Client.
@@ -52,15 +55,19 @@ func WithHTTPClient(client *http.Client) ClientOption {
 	}
 }
 
-// WithCache enables in-memory response caching with the given default TTL.
-// A non-positive ttl leaves caching disabled.
-func WithCache(ttl time.Duration) ClientOption {
+// WithCacheSeconds enables in-memory response caching with the given default
+// TTL in seconds. Cannot be combined with WithCacheMinutes.
+func WithCacheSeconds(seconds int) ClientOption {
 	return func(c *Client) {
-		if ttl <= 0 {
-			return
-		}
-		c.defaultTTL = ttl
-		c.cache = newCache()
+		c.cacheSeconds = &seconds
+	}
+}
+
+// WithCacheMinutes enables in-memory response caching with the given default
+// TTL in minutes. Cannot be combined with WithCacheSeconds.
+func WithCacheMinutes(minutes int) ClientOption {
+	return func(c *Client) {
+		c.cacheMinutes = &minutes
 	}
 }
 
@@ -68,20 +75,31 @@ func WithCache(ttl time.Duration) ClientOption {
 type CallOption func(*callOptions)
 
 type callOptions struct {
-	ttl    time.Duration
-	ttlSet bool
+	seconds *int
+	minutes *int
 }
 
-// WithCallTTL overrides the cache TTL for a single GetFlag call. A ttl of 0
-// disables caching for that call even if a default is configured.
-func WithCallTTL(ttl time.Duration) CallOption {
+// WithCallSeconds overrides the cache TTL for a single GetFlag call in
+// seconds. A value of 0 disables caching for that call even if a default is
+// configured. Cannot be combined with WithCallMinutes.
+func WithCallSeconds(seconds int) CallOption {
 	return func(o *callOptions) {
-		o.ttl = ttl
-		o.ttlSet = true
+		o.seconds = &seconds
 	}
 }
 
-// NewClient creates a new Client with optional configurations.
+// WithCallMinutes overrides the cache TTL for a single GetFlag call in
+// minutes. A value of 0 disables caching for that call. Cannot be combined
+// with WithCallSeconds.
+func WithCallMinutes(minutes int) CallOption {
+	return func(o *callOptions) {
+		o.minutes = &minutes
+	}
+}
+
+// NewClient creates a new Client with optional configurations. Configuration
+// errors (such as conflicting cache options) are deferred and surfaced from
+// GetFlag.
 func NewClient(opts ...ClientOption) *Client {
 	client := &Client{
 		version: "v1",
@@ -93,14 +111,39 @@ func NewClient(opts ...ClientOption) *Client {
 		opt(client)
 	}
 
+	if client.cacheSeconds != nil && client.cacheMinutes != nil {
+		client.configErr = fmt.Errorf("client cache options cannot specify both WithCacheSeconds and WithCacheMinutes")
+		return client
+	}
+	if client.cacheSeconds != nil {
+		client.defaultTTL = time.Duration(*client.cacheSeconds) * time.Second
+	} else if client.cacheMinutes != nil {
+		client.defaultTTL = time.Duration(*client.cacheMinutes) * time.Minute
+	}
+	client.cache = newCache()
+
 	return client
 }
 
 // GetFlag retrieves a feature flag from the RocketFlag API.
 func (c *Client) GetFlag(flagID string, userContext UserContext, opts ...CallOption) (*FlagStatus, error) {
-	co := callOptions{ttl: c.defaultTTL}
+	if c.configErr != nil {
+		return nil, c.configErr
+	}
+
+	co := callOptions{}
 	for _, opt := range opts {
 		opt(&co)
+	}
+	if co.seconds != nil && co.minutes != nil {
+		return nil, fmt.Errorf("call cache options cannot specify both WithCallSeconds and WithCallMinutes")
+	}
+
+	ttl := c.defaultTTL
+	if co.seconds != nil {
+		ttl = time.Duration(*co.seconds) * time.Second
+	} else if co.minutes != nil {
+		ttl = time.Duration(*co.minutes) * time.Minute
 	}
 
 	u, err := url.Parse(fmt.Sprintf("%s/%s/flags/%s", c.apiUrl, c.version, flagID))
@@ -115,7 +158,7 @@ func (c *Client) GetFlag(flagID string, userContext UserContext, opts ...CallOpt
 	encoded := q.Encode()
 	u.RawQuery = encoded
 
-	cacheActive := c.cache != nil && co.ttl > 0
+	cacheActive := c.cache != nil && ttl > 0
 	var key string
 	if cacheActive {
 		key = flagID + "?" + encoded
@@ -145,7 +188,7 @@ func (c *Client) GetFlag(flagID string, userContext UserContext, opts ...CallOpt
 	}
 
 	if cacheActive {
-		c.cache.set(key, &flag, co.ttl)
+		c.cache.set(key, &flag, ttl)
 	}
 
 	return &flag, nil
