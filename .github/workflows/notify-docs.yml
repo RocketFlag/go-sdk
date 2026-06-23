@@ -1,0 +1,39 @@
+name: Notify docs on release
+
+# When a tagged release is published here, ping the RocketFlag/docs repo so its
+# docs-sync workflow can review the release and propose documentation updates.
+# Fires only on published releases — never on plain pushes/merges to main.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      # Mint a short-lived token for the docs repo so we can dispatch to it.
+      - name: Mint docs App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.DOCS_BOT_APP_ID }}
+          private-key: ${{ secrets.DOCS_BOT_PRIVATE_KEY }}
+          owner: RocketFlag
+          repositories: docs
+
+      - name: Dispatch docs-sync
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: RocketFlag/docs
+          event-type: docs-sync
+          client-payload: |
+            {
+              "repo": "${{ github.repository }}",
+              "tag": "${{ github.event.release.tag_name }}",
+              "release_url": "${{ github.event.release.html_url }}"
+            }
