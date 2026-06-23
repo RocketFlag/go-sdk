@@ -1,3 +1,3 @@
-module github.com/RocketFlag/go-sdk
+module github.com/rocketflag/go-sdk
 
 go 1.22.3
