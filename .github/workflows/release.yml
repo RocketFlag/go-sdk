@@ -1,0 +1,43 @@
+name: Release (Go module)
+
+# On a published release, verify the tagged code and "warm" the Go module proxy
+# so the new version is immediately resolvable via `go get` and indexed on
+# pkg.go.dev — Go has no separate publish step beyond the git tag.
+#
+# Note: the proxy caches versions immutably, so this verification is a backstop.
+# The real gate is the required `test-and-build` check on main (a tag should only
+# ever point at already-tested code).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify (vet + test)
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Warm Go module proxy
+        env:
+          MODULE: github.com/rocketflag/go-sdk
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          echo "Warming proxy for ${MODULE}@${VERSION}"
+          curl -fsS "https://proxy.golang.org/${MODULE}/@v/${VERSION}.info"
+          curl -fsS "https://proxy.golang.org/${MODULE}/@v/${VERSION}.mod" -o /dev/null
+          curl -fsS "https://proxy.golang.org/${MODULE}/@v/${VERSION}.zip" -o /dev/null
+          echo "::notice title=Published::${MODULE}@${VERSION} → https://pkg.go.dev/${MODULE}@${VERSION}"
