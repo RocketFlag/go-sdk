@@ -32,10 +32,11 @@ jobs:
 
       - name: Warm Go module proxy
         env:
-          MODULE: github.com/rocketflag/go-sdk
           VERSION: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
+          # Read the module path from go.mod so it carries the major version suffix (/v2).
+          MODULE="$(go list -m)"
           echo "Warming proxy for ${MODULE}@${VERSION}"
           curl -fsS "https://proxy.golang.org/${MODULE}/@v/${VERSION}.info"
           curl -fsS "https://proxy.golang.org/${MODULE}/@v/${VERSION}.mod" -o /dev/null

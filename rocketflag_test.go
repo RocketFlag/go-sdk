@@ -2,14 +2,17 @@ package rocketflag
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,7 +54,7 @@ func TestGetFlag_Success(t *testing.T) {
 	client := NewClient(WithHTTPClient(MockClient(mockResponse, nil)))
 
 	// Call the function
-	flag, err := client.GetFlag("123", UserContext{"cohort": "beta"})
+	flag, err := client.GetFlag(context.Background(), "123", UserContext{"cohort": "beta"})
 
 	// Assertions
 	if err != nil {
@@ -67,7 +70,7 @@ func TestGetFlag_ErrorParsingURL(t *testing.T) {
 	client := NewClient(WithAPIURL(":invalid-url"))
 
 	// Call the function
-	_, err := client.GetFlag("123", nil)
+	_, err := client.GetFlag(context.Background(), "123", nil)
 
 	// Assertions
 	if err == nil {
@@ -80,34 +83,18 @@ func TestGetFlag_ErrorParsingURL(t *testing.T) {
 }
 
 func TestGetFlag_ErrorCreatingRequest(t *testing.T) {
-	// Create a client with a custom Transport that forces an error in NewRequest.
 	client := NewClient()
-	client.client = &http.Client{
-		Transport: &errorTransport{},
-	}
 
-	// Call the function
-	_, err := client.GetFlag("123", nil)
+	// A nil context is the one input NewRequestWithContext refuses.
+	var ctx context.Context
+	_, err := client.GetFlag(ctx, "123", nil)
 
-	// Assertions
 	if err == nil {
 		t.Fatal("Expected an error, got nil")
 	}
 	if !strings.Contains(err.Error(), "error creating request") {
 		t.Errorf("Expected error message to contain 'error creating request', got: %v", err)
 	}
-}
-
-// errorTransport is a custom RoundTripper that forces an error during request creation.
-type errorTransport struct{}
-
-func (t *errorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Attempt to create a new request with an invalid URL, which will cause an error.
-	_, err := http.NewRequest(req.Method, "\n", req.Body) // Invalid URL
-	if err != nil {
-		return nil, fmt.Errorf("error creating request: %w", err)
-	}
-	return nil, errors.New("unexpected: RoundTrip should not reach this point")
 }
 
 func TestGetFlag_ErrorMakingRequest(t *testing.T) {
@@ -118,7 +105,7 @@ func TestGetFlag_ErrorMakingRequest(t *testing.T) {
 	client := NewClient(WithHTTPClient(MockClient(nil, mockError)))
 
 	// Call the function
-	_, err := client.GetFlag("123", nil)
+	_, err := client.GetFlag(context.Background(), "123", nil)
 
 	// Assertions
 	if err == nil {
@@ -141,7 +128,7 @@ func TestGetFlag_ServerError(t *testing.T) {
 	client := NewClient(WithHTTPClient(MockClient(mockResponse, nil)))
 
 	// Call the function
-	_, err := client.GetFlag("123", nil)
+	_, err := client.GetFlag(context.Background(), "123", nil)
 
 	// Assertions
 	if err == nil {
@@ -164,7 +151,7 @@ func TestGetFlag_ErrorDecodingResponse(t *testing.T) {
 	client := NewClient(WithHTTPClient(MockClient(mockResponse, nil)))
 
 	// Call the function
-	_, err := client.GetFlag("123", nil)
+	_, err := client.GetFlag(context.Background(), "123", nil)
 
 	// Assertions
 	if err == nil {
@@ -201,8 +188,8 @@ func TestGetFlag_UserContext(t *testing.T) {
 	}
 
 	// Call the function with user context
-	userContext := UserContext{"cohort": "beta", "id": 123, "active": true}
-	_, err := client.GetFlag("123", userContext)
+	userContext := UserContext{"cohort": "beta", "targetingKey": "user-42", "plan": "pro", "country": "AU"}
+	_, err := client.GetFlag(context.Background(), "123", userContext)
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -214,7 +201,7 @@ func TestGetFlag_UserContext(t *testing.T) {
 
 	expectedQuery := url.Values{}
 	for k, v := range userContext {
-		expectedQuery.Set(k, fmt.Sprintf("%v", v))
+		expectedQuery.Set(k, v)
 	}
 	actualQuery := capturedRequest.URL.Query()
 
@@ -256,7 +243,7 @@ func TestGetFlag_CacheHit(t *testing.T) {
 	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
 	for i := 0; i < 3; i++ {
-		got, err := client.GetFlag("123", UserContext{"cohort": "beta"})
+		got, err := client.GetFlag(context.Background(), "123", UserContext{"cohort": "beta"})
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
@@ -274,11 +261,11 @@ func TestGetFlag_CacheExpiry(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
 	client, transport := newCountingClient(t, flag, WithCache(10*time.Millisecond))
 
-	if _, err := client.GetFlag("123", nil); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(25 * time.Millisecond)
-	if _, err := client.GetFlag("123", nil); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,10 +278,10 @@ func TestGetFlag_CacheKeyIncludesUserContext(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
 	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
-	if _, err := client.GetFlag("123", UserContext{"cohort": "alpha"}); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", UserContext{"cohort": "alpha"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.GetFlag("123", UserContext{"cohort": "beta"}); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", UserContext{"cohort": "beta"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -307,10 +294,10 @@ func TestGetFlag_PerCallTTLDisables(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
 	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
-	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", nil, WithCallTTL(0)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.GetFlag("123", nil, WithCallTTL(0)); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", nil, WithCallTTL(0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -323,10 +310,10 @@ func TestGetFlag_PerCallTTLEnables(t *testing.T) {
 	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
 	client, transport := newCountingClient(t, flag)
 
-	if _, err := client.GetFlag("123", nil, WithCallTTL(time.Minute)); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", nil, WithCallTTL(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.GetFlag("123", nil, WithCallTTL(time.Minute)); err != nil {
+	if _, err := client.GetFlag(context.Background(), "123", nil, WithCallTTL(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -340,7 +327,7 @@ func TestGetFlag_NoCacheByDefault(t *testing.T) {
 	client, transport := newCountingClient(t, flag)
 
 	for i := 0; i < 3; i++ {
-		if _, err := client.GetFlag("123", nil); err != nil {
+		if _, err := client.GetFlag(context.Background(), "123", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -354,13 +341,13 @@ func TestGetFlag_CachedResultIsolatedFromCallerMutation(t *testing.T) {
 	flag := &FlagStatus{Name: "original", Enabled: true, ID: "123"}
 	client, transport := newCountingClient(t, flag, WithCache(time.Minute))
 
-	first, err := client.GetFlag("123", nil)
+	first, err := client.GetFlag(context.Background(), "123", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first.Name = "mutated"
 
-	second, err := client.GetFlag("123", nil)
+	second, err := client.GetFlag(context.Background(), "123", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,6 +356,161 @@ func TestGetFlag_CachedResultIsolatedFromCallerMutation(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&transport.count); n != 1 {
 		t.Errorf("expected 1 HTTP request, got %d", n)
+	}
+}
+
+func TestGetFlag_PassesContextToRequest(t *testing.T) {
+	type ctxKey struct{}
+	var got any
+	client := NewClient(WithHTTPClient(&http.Client{Transport: RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		got = req.Context().Value(ctxKey{})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"name":"f","enabled":true,"id":"123"}`)),
+		}, nil
+	})}))
+
+	ctx := context.WithValue(context.Background(), ctxKey{}, "trace-1")
+	if _, err := client.GetFlag(ctx, "123", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got != "trace-1" {
+		t.Errorf("expected the request to carry the caller's context, got value %v", got)
+	}
+}
+
+func TestGetFlag_CancelledContext(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		fmt.Fprint(w, `{"name":"f","enabled":true,"id":"123"}`)
+	}))
+	defer server.Close()
+	client := NewClient(WithAPIURL(server.URL))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.GetFlag(ctx, "123", nil)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if n := atomic.LoadInt32(&hits); n != 0 {
+		t.Errorf("expected no request to reach the server, got %d", n)
+	}
+}
+
+func TestGetFlag_ContextDeadline(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	client := NewClient(WithAPIURL(server.URL))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := client.GetFlag(ctx, "123", nil)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("expected GetFlag to return at the deadline, took %v", elapsed)
+	}
+}
+
+func TestGetFlag_CacheEvictsLeastRecentlyUsed(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, transport := newCountingClient(t, flag, WithCache(time.Minute), WithCacheMaxEntries(2))
+	get := func(key string) {
+		t.Helper()
+		if _, err := client.GetFlag(context.Background(), "123", UserContext{"targetingKey": key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requests := func() int32 { return atomic.LoadInt32(&transport.count) }
+
+	get("a")
+	get("b")
+	get("a") // hit, so "b" is now least recently used
+	if n := requests(); n != 2 {
+		t.Fatalf("expected 2 HTTP requests, got %d", n)
+	}
+
+	get("c") // evicts "b"
+	get("a")
+	if n := requests(); n != 3 {
+		t.Fatalf("expected \"a\" to survive eviction, got %d HTTP requests", n)
+	}
+
+	get("b")
+	if n := requests(); n != 4 {
+		t.Fatalf("expected \"b\" to have been evicted, got %d HTTP requests", n)
+	}
+}
+
+func TestGetFlag_CacheCapDefaultsTo10000(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	for _, opts := range [][]ClientOption{
+		{WithCache(time.Minute)},
+		{WithCache(time.Minute), WithCacheMaxEntries(0)},
+		{WithCache(time.Minute), WithCacheMaxEntries(-5)},
+	} {
+		client, transport := newCountingClient(t, flag, opts...)
+		for i := 0; i <= DefaultCacheMaxEntries; i++ {
+			if _, err := client.GetFlag(context.Background(), "123", UserContext{"targetingKey": fmt.Sprintf("user-%d", i)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := client.GetFlag(context.Background(), "123", UserContext{"targetingKey": "user-10000"}); err != nil {
+			t.Fatal(err)
+		}
+		if n := atomic.LoadInt32(&transport.count); n != DefaultCacheMaxEntries+1 {
+			t.Fatalf("expected the newest entry to be cached, got %d HTTP requests", n)
+		}
+		if _, err := client.GetFlag(context.Background(), "123", UserContext{"targetingKey": "user-0"}); err != nil {
+			t.Fatal(err)
+		}
+		if n := atomic.LoadInt32(&transport.count); n != DefaultCacheMaxEntries+2 {
+			t.Fatalf("expected the oldest entry to be evicted, got %d HTTP requests", n)
+		}
+		if n := len(client.cache.entries); n != DefaultCacheMaxEntries {
+			t.Errorf("expected %d cache entries, got %d", DefaultCacheMaxEntries, n)
+		}
+	}
+}
+
+func TestGetFlag_CacheConcurrentUse(t *testing.T) {
+	flag := &FlagStatus{Name: "f", Enabled: true, ID: "123"}
+	client, _ := newCountingClient(t, flag, WithCache(time.Minute), WithCacheMaxEntries(8))
+
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				key := fmt.Sprintf("user-%d", (g*i)%20)
+				if _, err := client.GetFlag(context.Background(), "123", UserContext{"targetingKey": key}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	if n := len(client.cache.entries); n > 8 {
+		t.Errorf("expected at most 8 cache entries, got %d", n)
+	}
+	if client.cache.order.Len() != len(client.cache.entries) {
+		t.Errorf("cache list and map disagree: %d vs %d", client.cache.order.Len(), len(client.cache.entries))
 	}
 }
 
