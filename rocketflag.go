@@ -4,9 +4,12 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,6 +17,11 @@ import (
 // DefaultCacheMaxEntries is the most responses the cache holds unless
 // WithCacheMaxEntries sets another limit.
 const DefaultCacheMaxEntries = 10000
+
+const (
+	defaultHTTPTimeout = 10 * time.Second
+	maxResponseBytes   = 1 << 20 // 1 MiB
+)
 
 // FlagStatus represents the status of a feature flag.
 type FlagStatus struct {
@@ -108,7 +116,7 @@ func NewClient(opts ...ClientOption) *Client {
 	client := &Client{
 		version:    "v1",
 		apiUrl:     "https://api.rocketflag.app",
-		client:     http.DefaultClient,
+		client:     &http.Client{Timeout: defaultHTTPTimeout},
 		maxEntries: DefaultCacheMaxEntries,
 	}
 
@@ -124,6 +132,13 @@ func NewClient(opts ...ClientOption) *Client {
 // GetFlag retrieves a feature flag from the RocketFlag API. The request is
 // bound to ctx, so cancelling ctx or passing its deadline aborts it.
 func (c *Client) GetFlag(ctx context.Context, flagID string, userContext UserContext, opts ...CallOption) (*FlagStatus, error) {
+	if flagID == "" {
+		return nil, errors.New("flagID is required")
+	}
+	if flagID == "." || flagID == ".." || strings.ContainsAny(flagID, "/\\") {
+		return nil, fmt.Errorf("invalid flagID: %q", flagID)
+	}
+
 	co := callOptions{}
 	for _, opt := range opts {
 		opt(&co)
@@ -134,7 +149,9 @@ func (c *Client) GetFlag(ctx context.Context, flagID string, userContext UserCon
 		ttl = co.ttl
 	}
 
-	u, err := url.Parse(fmt.Sprintf("%s/%s/flags/%s", c.apiUrl, c.version, flagID))
+	base := strings.TrimRight(c.apiUrl, "/")
+	ver := strings.Trim(c.version, "/")
+	u, err := url.Parse(fmt.Sprintf("%s/%s/flags/%s", base, ver, url.PathEscape(flagID)))
 	if err != nil {
 		return nil, fmt.Errorf("error parsing URL: %w", err)
 	}
@@ -170,7 +187,7 @@ func (c *Client) GetFlag(ctx context.Context, flagID string, userContext UserCon
 	}
 
 	var flag FlagStatus
-	if err := json.NewDecoder(resp.Body).Decode(&flag); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&flag); err != nil {
 		return nil, fmt.Errorf("error decoding response: %w", err)
 	}
 

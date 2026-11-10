@@ -514,6 +514,25 @@ func TestGetFlag_CacheConcurrentUse(t *testing.T) {
 	}
 }
 
+func TestGetFlag_RejectsTraversalAndEmptyFlagID(t *testing.T) {
+	client := NewClient()
+	for _, bad := range []string{"", ".", "..", "../admin", "a/b", `a\b`} {
+		if _, err := client.GetFlag(context.Background(), bad, nil); err == nil {
+			t.Errorf("expected error for flagID %q, got nil", bad)
+		}
+	}
+}
+
+func TestNewClient_SetsDefaultHTTPTimeout(t *testing.T) {
+	client := NewClient()
+	if client.client == http.DefaultClient {
+		t.Fatal("expected NewClient to use a dedicated http.Client, not http.DefaultClient")
+	}
+	if client.client.Timeout != defaultHTTPTimeout {
+		t.Fatalf("expected default timeout %v, got %v", defaultHTTPTimeout, client.client.Timeout)
+	}
+}
+
 // RoundTripFunc is an adapter to allow the use of ordinary functions as RoundTrippers.
 type RoundTripFunc func(req *http.Request) (*http.Response, error)
 
