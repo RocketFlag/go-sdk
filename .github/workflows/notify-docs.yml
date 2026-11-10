@@ -18,12 +18,22 @@ jobs:
       # Mint a short-lived token for the docs repo so we can dispatch to it.
       - name: Mint docs App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.DOCS_BOT_APP_ID }}
           private-key: ${{ secrets.DOCS_BOT_PRIVATE_KEY }}
           owner: RocketFlag
           repositories: docs
+
+      - name: Build client payload
+        id: payload
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+        run: |
+          PAYLOAD=$(jq -nc --arg repo "$REPO" --arg tag "$TAG" --arg url "$RELEASE_URL" '{repo: $repo, tag: $tag, release_url: $url}')
+          echo "json=$PAYLOAD" >> "$GITHUB_OUTPUT"
 
       - name: Dispatch docs-sync
         uses: peter-evans/repository-dispatch@v3
@@ -31,9 +41,4 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           repository: RocketFlag/docs
           event-type: docs-sync
-          client-payload: |
-            {
-              "repo": "${{ github.repository }}",
-              "tag": "${{ github.event.release.tag_name }}",
-              "release_url": "${{ github.event.release.html_url }}"
-            }
+          client-payload: ${{ steps.payload.outputs.json }}
